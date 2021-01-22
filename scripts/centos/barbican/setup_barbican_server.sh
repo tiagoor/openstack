@@ -2,7 +2,7 @@
 
 set -o errexit -o nounset
 
-TOP_DIR=$(cd $(cat "../TOP_DIR" 2>/dev/null||echo $(dirname "$0"))/.. && pwd)
+TOP_DIR=$(cd  ~ 2>/dev/null||echo $(dirname "$0")/.. && pwd)
 
 source "$TOP_DIR/config/paths"
 source "$LIB_DIR/functions.guest.sh"
@@ -20,17 +20,17 @@ source "$CONFIG_DIR/credentials"
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 BARBICAN_DB_USER=barbican
-BARBICAN_DBPASS=barbican_db_secret
-BARBICAN_PASS=barbican_user_secret
+BARBICAN_DBPASS=barbicanDBPass
+BARBICAN_PASS=barbicanPass
 
 echo "Setting up database for barbican."
 setup_database barbican "$BARBICAN_DB_USER" "$BARBICAN_DBPASS"
 
 # This script is not part of the standard install, cache may be stale by now.
-sudo apt update
+sudo yum update
 
 echo "Installing barbican packages."
-sudo apt install -y barbican-api barbican-worker barbican-keystone-listener
+sudo yum install -y openstack-barbican-api openstack-barbican-worker openstack-barbican-keystone-listener
 
 echo "Sourcing the admin credentials."
 source "$CONFIG_DIR/admin-openstackrc.sh"
@@ -119,17 +119,41 @@ iniset_sudo $conf oslo_messaging_rabbit  amqp_durable_queues False
 # for barbican.
 iniset_sudo $conf keystone_notifications enable True
 
-echo "Starting barbican-keystone-listener."
-sudo /etc/init.d/barbican-keystone-listener start
+sudo touch /etc/httpd/conf.d/wsgi-barbican.conf 
 
-echo "Removing default SQLite database."
-sudo rm -v /var/lib/barbican/barbican.sqlite
+cat <<WSGI | sudo tee -a /etc/httpd/conf.d/wsgi-barbican.conf
+<VirtualHost [::1]:9311>
+    ServerName controller
+
+    ## Logging
+    ErrorLog "/var/log/httpd/barbican_wsgi_main_error_ssl.log"
+    LogLevel debug
+    ServerSignature Off
+    CustomLog "/var/log/httpd/barbican_wsgi_main_access_ssl.log" combined
+
+    WSGIApplicationGroup %{GLOBAL}
+    WSGIDaemonProcess barbican-api display-name=barbican-api group=barbican processes=2 threads=8 user=barbican
+    WSGIProcessGroup barbican-api
+    WSGIScriptAlias / "/usr/lib/python3.6/site-packages/barbican/api/app.wsgi"
+    WSGIPassAuthorization On
+</VirtualHost>
+WSGI
+sudo su -s /bin/sh -c "barbican-manage db upgrade" barbican
+
+echo "Starting barbican-keystone-listener."
+sudo systemctl start openstack-barbican-api.service && sudo systemctl enable openstack-barbican-api.service
+
+sudo systemctl restart httpd
 
 echo "Showing barbican secret list."
-barbican secret list
+openstack secret list
 
 echo "Getting a token."
 token=$(openstack token issue -cid -fvalue)
+
+sudo firewall-cmd --permanent --add-port=9311/tcp
+sudo firewall-cmd --reload
+
 
 echo "token: $token"
 
@@ -141,7 +165,7 @@ curl -s -H "X-Auth-Token: $token" \
 
 echo "Getting URI for secret."
 # Assuming the list contains only one item
-uri=$(barbican secret list -c"Secret href" -fvalue)
+uri=$(openstack secret list -c"Secret href" -fvalue)
 echo "URI: $uri"
 
 echo "Showing payload via curl."
@@ -150,28 +174,28 @@ curl -s -H "X-Auth-Token: $token" \
     "$uri"
 
 echo "Showing payload using barbican client."
-barbican secret get "$uri" --payload -fvalue
+openstack secret get "$uri" --payload -fvalue
 
 echo "Deleting secret."
-barbican secret delete "$uri"
+openstack secret delete "$uri"
 
 echo "Using the barbican client, creating a named barbican secret."
-barbican secret store --name test_name
+openstack secret store --name test_name
 
 echo "Showing named barbican secret."
-barbican secret list --name test_name -cName -fvalue
+openstack secret list --name test_name -cName -fvalue
 
 echo "Getting URI for secret."
-uri=$(barbican secret list --name test_name -c"Secret href" -fvalue)
+uri=$(openstack secret list --name test_name -c"Secret href" -fvalue)
 
 echo "Writing payload."
-barbican secret update "$uri" "my_payload"
+openstack secret update "$uri" "my_payload"
 
 echo "Showing secret payload."
-barbican secret get "$uri"
+openstack secret get "$uri"
 
 echo "Showing payload using barbican client."
-barbican secret get "$uri" --payload -fvalue
+openstack secret get "$uri" --payload -fvalue
 
 echo "Deleting secret."
-barbican secret delete "$uri"
+openstack secret delete "$uri"
